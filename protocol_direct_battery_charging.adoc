@@ -1,0 +1,163 @@
+= Protocol Direct Battery Charging
+:imagesdir: .
+
+CAN frame analysis for direct charger <-> battery communication (no other e-bike systems involved).
+
+== Session Context
+
+* Topology: charger directly connected to battery.
+* Initial battery indicator: around 60-80% (4th bar blinking at start).
+* Observation: CAN communication starts when charger is connected.
+* Hypothesis: a dedicated activation pin may wake/enable the battery CAN interface, so charger may not be strictly required to start communication.
+* Capture file: `full_charge_cycle.jsonl`
+
+=== Battery Connector
+
+[source,text]
+----
+|^|   [  ?  ][  ?  ][  ?  ]   |^|   |^|
+| |                           | |   | |
+| |   [  ?  ][  ?  ][  ?  ]   | |   | |
+| |                           | |   | |
+|_|   [  ?  ][CAN_H][CAN_L]   |_|   |_|
+----
+
+Connector photos:
+
+image::jerry_rig_setup_charger_battery_sniffer_01.jpg[Jerry-rigged charger-battery-sniffer setup photo 1]
+image::jerry_rig_setup_charger_battery_sniffer_02.jpg[Jerry-rigged charger-battery-sniffer setup photo 2]
+
+=== Capture Command
+
+pass:[<medium><strong>Helper to find the USB-CAN serial device on macOS:</strong></medium>]
+pass:[<medium><code>ls /dev/tty.*</code></medium>]
+
+[source,bash]
+----
+uv run sniffer run \
+  --channels 1 \
+  --device-a /dev/tty.usbserial-1310 \
+  --output jsonl \
+  --output-path full_charge_cycle.jsonl
+----
+
+== Confirmed Traffic Patterns
+
+=== Startup/Broadcast
+
+ID `0x718` appears immediately with payloads:
+
+* `42 54 59 00 00 00 00 00` (`BTY.....`)
+* `50 57 52 68 10 90 01 A8` (`PWRh....`)
+
+=== Repeating Charge Dialogue
+
+Observed request/response-like sequence:
+
+* `0x709` `dlc=0` then `0x709` `dlc=8`
+* `0x714` `dlc=0` then `0x714` `dlc=4`
+* `0x715` `dlc=0` then `0x715` `dlc=4`
+* `0x70A` `dlc=0` then `0x70A` `dlc=8`
+* periodic `0x718` `dlc=8`
+
+Interpretation: `dlc=0` frames are likely RTR-like polls, followed by data responses on the same IDs.
+
+== Plot Commands and Artifacts
+
+=== 0x70A
+
+Emitter hypothesis: Battery
+
+[source,bash]
+----
+uv run sniffer plot \
+  --input-path full_charge_cycle.jsonl \
+  --can-ids 0x70A \
+  --byte-indexes 0,1,2,3,4,5,6,7 \
+  --output-path end_phase_0x70A.png
+----
+
+image::end_phase_0x70A.png[0x70A byte trends]
+
+Byte candidates:
+
+[cols="1,3,3,1",options="header"]
+|===
+| Byte | Likely meaning | Proposed scaling | Confidence
+
+| `0x70A[0]` | SOC candidate | `SOC% ~= b0` (to validate) | medium
+| `0x70A[1]` | Pack voltage candidate | `Vpack ~= b1 * 0.4V` (to validate) | medium
+| `0x70A[2]` | Temperature/status analog | unknown | low
+| `0x70A[3]` | Charge current candidate | `Ichg ~= b3 * 0.0368A` (to validate) | medium
+| `0x70A[4]` | State/flag/substate | unknown | low
+| `0x70A[5]` | Temperature/limit/stage | unknown | low
+| `0x70A[6]` | Temperature/state/balancing | unknown | low
+| `0x70A[7]` | Reference/target/checksum-like | unknown | low
+|===
+
+=== 0x709
+
+Emitter hypothesis: Battery
+
+[source,bash]
+----
+uv run sniffer plot \
+  --input-path full_charge_cycle.jsonl \
+  --can-ids 0x709 \
+  --byte-indexes 0,1,2,3,4,5,6,7 \
+  --output-path end_phase_0x709.png
+----
+
+image::end_phase_0x709.png[0x709 byte trends]
+
+Byte candidates:
+
+[cols="1,3,3,1",options="header"]
+|===
+| Byte | Likely meaning | Proposed scaling | Confidence
+
+| `0x709[0]` | Rolling counter / timer-like byte | `counter = b0 (mod 256)` | high
+| `0x709[1]` | State/status byte | unknown | low
+| `0x709[2]` | State/status byte | unknown | low
+| `0x709[3]` | State/status byte | unknown | low
+| `0x709[4]` | Mode/state selector candidate | unknown | low
+| `0x709[5]` | Fixed flag/constant candidate | unknown | low
+| `0x709[6]` | Reserved/constant | unknown | low
+| `0x709[7]` | Reserved/constant | unknown | low
+|===
+
+=== 0x718
+
+Emitter hypothesis: Uncertain (likely Battery in direct charger<->battery setup)
+
+[source,bash]
+----
+uv run sniffer plot \
+  --input-path full_charge_cycle.jsonl \
+  --can-ids 0x718 \
+  --byte-indexes 0,1,2,3,4,5,6,7 \
+  --output-path end_phase_0x718.png
+----
+
+image::end_phase_0x718.png[0x718 byte trends]
+
+Byte candidates:
+
+[cols="1,3,3,1",options="header"]
+|===
+| Byte | Likely meaning | Proposed scaling | Confidence
+
+| `0x718[0]` | Status/SOC-ish/mode constant | unknown | low
+| `0x718[1]` | Flag/small state counter | unknown | low
+| `0x718[2]` | Fixed reference/offset/status | unknown | low-medium
+| `0x718[3]` | Charge voltage or voltage request | unknown | medium-high
+| `0x718[4]` | Temperature or minor analog | unknown | low
+| `0x718[5]` | Charge current or current limit | unknown | high
+| `0x718[6]` | Flag/fault/enable | unknown | low
+| `0x718[7]` | Current/taper variable/checksum-like | unknown | high
+|===
+
+== Planned Validation Cycles
+
+* Heat battery scenario to observe failing-charge behavior.
+* Heat charger scenario to observe failing-charge behavior.
